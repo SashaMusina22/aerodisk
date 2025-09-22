@@ -26,15 +26,22 @@ def get_disks():
         disks_data = json.loads(result.stdout)
 
         disks = []
-        for d in disks_data["blockdevices"]:
-            if d["name"].startswith("loop") or d["name"] in ["vda", "sda", "sr0"]:
-                continue
 
+        def parse_device(dev, level=0):
             disks.append({
-                "name": d["name"],
-                "size": d["size"],
-                "mountpoint": d["mountpoint"]
+                "name": dev["name"],
+                "size": dev["size"],
+                "mountpoint": dev.get("mountpoint") or "",
+                "level": level,
+                "has_children": "children" in dev and len(dev["children"]) > 0
             })
+            for child in dev.get("children", []):
+                parse_device(child, level + 1)
+
+        for d in disks_data["blockdevices"]:
+            if d["name"].startswith("loop") or d["name"] in ["sr0"]:
+                continue
+            parse_device(d)
 
         return disks
     except Exception as e:
@@ -53,36 +60,10 @@ def list_mountpoints():
 @app.post("/mount")
 def mount_disk(name: str, path: str):
     try:
-        check = subprocess.run(
-            ["mount"], capture_output=True, text=True
-        )
-
-        for line in check.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 3:
-                dev, _, mountpoint = parts[0], parts[1], parts[2]
-                if mountpoint == path and dev != f"/dev/{name}":
-                    return {"error": f"Точка монтирования {path} уже используется устройством {dev}"}
-                if dev == f"/dev/{name}":
-                    return {"error": f"Диск {name} уже примонтирован в {mountpoint}"}
-
-        result = subprocess.run(
-            ["sudo", "-n", "mount", f"/dev/{name}", path],
-            capture_output=True, text=True
-        )
-
+        result = subprocess.run(["sudo", "-n", "mount", f"/dev/{name}", path], capture_output=True, text=True)
         if result.returncode != 0:
-            if "already mounted" in result.stderr.lower():
-                return {"error": f"Диск {name} уже примонтирован"}
-            elif "does not exist" in result.stderr.lower():
-                return {"error": f"Устройство /dev/{name} не существует"}
-            elif "mount point does not exist" in result.stderr.lower():
-                return {"error": f"Точка монтирования {path} не существует"}
-            else:
-                return {"error": f"Ошибка при монтировании {name}: {result.stderr.strip()}"}
-
+            return {"error": result.stderr.strip() or "Ошибка монтирования"}
         return {"message": f"Диск {name} примонтирован в {path}"}
-
     except Exception as e:
         return {"error": str(e)}
 
@@ -90,15 +71,9 @@ def mount_disk(name: str, path: str):
 @app.post("/umount")
 def umount_disk(name: str):
     try:
-        result = subprocess.run(
-            ["sudo", "-n", "umount", f"/dev/{name}"],
-            capture_output=True, text=True
-        )
+        result = subprocess.run(["sudo", "-n", "umount", f"/dev/{name}"], capture_output=True, text=True)
         if result.returncode != 0:
-            if "not mounted" in result.stderr.lower():
-                return {"error": f"Не удалось отмонтировать {name}: диск не был примонтирован"}
-            return {"error": f"Ошибка при отмонтировании {name}: {result.stderr.strip()}"}
-
+            return {"error": result.stderr.strip() or "Ошибка отмонтирования"}
         return {"message": f"Диск {name} отмонтирован"}
     except Exception as e:
         return {"error": str(e)}
@@ -107,39 +82,19 @@ def umount_disk(name: str):
 @app.post("/format")
 def format_disk(name: str, fstype: str = "ext4"):
     try:
-        result = subprocess.run(
-            ["sudo", "-n", "mkfs", "-t", fstype, "-F", f"/dev/{name}"],
-            capture_output=True, text=True
-        )
+        result = subprocess.run(["sudo", "-n", "mkfs", "-t", fstype, "-F", f"/dev/{name}"], capture_output=True, text=True)
         if result.returncode != 0:
-            if "is mounted" in result.stderr:
-                return {"error": f"Не удалось отформатировать {name}: диск смонтирован. Сначала отмонтируй его."}
-            if "No such file" in result.stderr:
-                return {"error": f"Не удалось отформатировать {name}: такого диска не существует."}
-            if "busy" in result.stderr:
-                return {"error": f"Не удалось отформатировать {name}: диск сейчас используется системой."}
-            return {"error": f"Ошибка при форматировании {name}: {result.stderr.strip()}"}
-
-        return {"message": f"Диск {name} успешно отформатирован в {fstype}"}
+            return {"error": result.stderr.strip() or "Ошибка форматирования"}
+        return {"message": f"Диск {name} отформатирован в {fstype}"}
     except Exception as e:
-        return {"error": f"Неизвестная ошибка при форматировании: {str(e)}"}
+        return {"error": str(e)}
 
 
 @app.post("/create_mountpoint")
 def create_mountpoint(name: str):
     try:
-        path = name
-
-        os.makedirs(path, exist_ok=True)
-
-        result = subprocess.run(
-            ["sudo", "-n", "chown", f"{os.getlogin()}:{os.getlogin()}", path],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            return {"error": f"Ошибка при изменении владельца {path}: {result.stderr.strip()}"}
-
-        return {"message": f"Точка монтирования {path} создана"}
-
+        os.makedirs(name, exist_ok=True)
+        subprocess.run(["sudo", "-n", "chown", f"{os.getlogin()}:{os.getlogin()}", name], capture_output=True, text=True)
+        return {"message": f"Точка монтирования {name} создана"}
     except Exception as e:
         return {"error": str(e)}
